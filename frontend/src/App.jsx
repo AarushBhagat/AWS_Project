@@ -28,9 +28,14 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 
 const BACKEND_URL = 'http://65.0.86.103:5000'
+const AWS_REGION = import.meta.env.VITE_AWS_REGION || 'ap-south-1'
+const AWS_BUCKET_NAME = import.meta.env.VITE_AWS_BUCKET_NAME || ''
+const AWS_ACCESS_KEY_ID = import.meta.env.VITE_AWS_ACCESS_KEY_ID || ''
+const AWS_SECRET_ACCESS_KEY = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || ''
 
 const navItems = [
   { label: 'Overview', href: '#hero' },
@@ -99,10 +104,13 @@ const initialUploadState = {
   selectedFile: null,
   status: 'idle',
   progress: 0,
-  message: 'Drag and drop a file here or browse to upload it to the cloud.',
+  message: 'Drag and drop a file here or browse to upload it to AWS S3.',
   error: '',
   uploadedAt: '',
   responseText: '',
+  uploadedUrl: '',
+  objectKey: '',
+  bucketName: '',
 }
 
 function formatFileSize(bytes) {
@@ -115,6 +123,22 @@ function formatFileSize(bytes) {
   const size = bytes / 1024 ** exponent
 
   return `${size.toFixed(size >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`
+}
+
+function sanitizeFileName(fileName) {
+  return fileName.replace(/[^a-zA-Z0-9._-]+/g, '-')
+}
+
+function createUniqueObjectKey(fileName) {
+  const timestamp = Date.now()
+  const randomPart = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)
+  const safeName = sanitizeFileName(fileName)
+
+  return `uploads/${timestamp}-${randomPart}-${safeName}`
+}
+
+function createS3PublicUrl(bucketName, region, objectKey) {
+  return `https://${bucketName}.s3.${region}.amazonaws.com/${encodeURIComponent(objectKey).replace(/%2F/g, '/')}`
 }
 
 function SectionHeader({ eyebrow, title, subtitle }) {
@@ -151,6 +175,7 @@ function App() {
   })
   const [deploymentInfo, setDeploymentInfo] = useState(deploymentDefaults)
   const fileInputRef = useRef(null)
+  const uploadProgressRef = useRef(null)
 
   const frontendUrl = useMemo(() => {
     if (typeof window === 'undefined') {
@@ -243,10 +268,13 @@ function App() {
       selectedFile: file,
       status: 'ready',
       progress: 0,
-      message: `Ready to upload ${file.name} to AWS S3.`,
+      message: `Ready to upload ${file.name} directly to AWS S3.`,
       error: '',
       uploadedAt: '',
       responseText: '',
+      uploadedUrl: '',
+      objectKey: '',
+      bucketName: '',
     }))
   }, [])
 
@@ -270,45 +298,75 @@ function App() {
       return
     }
 
-    const formData = new FormData()
-    formData.append('file', uploadState.selectedFile)
+    if (!AWS_BUCKET_NAME || !AWS_REGION || !AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY) {
+      setUploadState((current) => ({
+        ...current,
+        status: 'error',
+        message: 'Upload failed',
+        error: 'Missing AWS credentials or bucket configuration in Vite environment variables.',
+      }))
+      return
+    }
+
+    const selectedFile = uploadState.selectedFile
+    const objectKey = createUniqueObjectKey(selectedFile.name)
+    const uploadedUrl = createS3PublicUrl(AWS_BUCKET_NAME, AWS_REGION, objectKey)
+    const s3Client = new S3Client({
+      region: AWS_REGION,
+      credentials: {
+        accessKeyId: AWS_ACCESS_KEY_ID,
+        secretAccessKey: AWS_SECRET_ACCESS_KEY,
+      },
+    })
+
+    if (uploadProgressRef.current) {
+      window.clearInterval(uploadProgressRef.current)
+      uploadProgressRef.current = null
+    }
 
     setUploadState((current) => ({
       ...current,
       status: 'uploading',
-      progress: 0,
-      message: 'Uploading file to AWS S3...',
+      progress: 8,
+      message: 'Uploading file directly to AWS S3...',
       error: '',
       responseText: '',
+      uploadedUrl: '',
+      objectKey: '',
+      bucketName: '',
     }))
 
-    const xhr = new XMLHttpRequest()
+    uploadProgressRef.current = window.setInterval(() => {
+      setUploadState((current) => {
+        if (current.status !== 'uploading') {
+          return current
+        }
 
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) {
-        return
-      }
+        const nextProgress = current.progress < 92 ? current.progress + 4 : current.progress
+        return {
+          ...current,
+          progress: nextProgress,
+          message: `Uploading... ${nextProgress}%`,
+        }
+      })
+    }, 180)
 
-      const progress = Math.round((event.loaded / event.total) * 100)
+    const uploadToS3 = async () => {
+      try {
+        const fileBody = new Uint8Array(await selectedFile.arrayBuffer())
 
-      setUploadState((current) => ({
-        ...current,
-        progress,
-        message: `Uploading... ${progress}%`,
-      }))
-    }
+        await s3Client.send(
+          new PutObjectCommand({
+            Bucket: AWS_BUCKET_NAME,
+            Key: objectKey,
+            Body: fileBody,
+            ContentType: selectedFile.type || 'application/octet-stream',
+          }),
+        )
 
-    xhr.onload = () => {
-      const uploadSucceeded = xhr.status >= 200 && xhr.status < 300
-
-      if (uploadSucceeded) {
-        let responseText = xhr.responseText || 'File uploaded successfully.'
-
-        try {
-          const parsedResponse = JSON.parse(xhr.responseText)
-          responseText = parsedResponse.message || responseText
-        } catch {
-          responseText = xhr.responseText || responseText
+        if (uploadProgressRef.current) {
+          window.clearInterval(uploadProgressRef.current)
+          uploadProgressRef.current = null
         }
 
         setUploadState((current) => ({
@@ -318,30 +376,27 @@ function App() {
           message: 'Upload successful',
           error: '',
           uploadedAt: new Date().toLocaleString(),
-          responseText,
+          responseText: `File uploaded successfully to ${uploadedUrl}`,
+          uploadedUrl,
+          objectKey,
+          bucketName: AWS_BUCKET_NAME,
         }))
-        return
+      } catch (error) {
+        if (uploadProgressRef.current) {
+          window.clearInterval(uploadProgressRef.current)
+          uploadProgressRef.current = null
+        }
+
+        setUploadState((current) => ({
+          ...current,
+          status: 'error',
+          message: 'Upload failed',
+          error: error instanceof Error ? error.message : 'Unknown S3 upload error',
+        }))
       }
-
-      setUploadState((current) => ({
-        ...current,
-        status: 'error',
-        message: 'Upload failed',
-        error: `Server returned status ${xhr.status}`,
-      }))
     }
 
-    xhr.onerror = () => {
-      setUploadState((current) => ({
-        ...current,
-        status: 'error',
-        message: 'Upload failed',
-        error: 'Network error while uploading the file.',
-      }))
-    }
-
-    xhr.open('POST', `${BACKEND_URL}/upload`)
-    xhr.send(formData)
+    void uploadToS3()
   }, [uploadState.selectedFile, uploadState.status])
 
   const handleDrop = useCallback(
@@ -385,6 +440,15 @@ function App() {
     }, 1200)
 
     return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (uploadProgressRef.current) {
+        window.clearInterval(uploadProgressRef.current)
+        uploadProgressRef.current = null
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -856,7 +920,7 @@ function App() {
                         <p className="text-xs font-semibold uppercase tracking-[0.34em] text-cyan-200">Cloud upload workspace</p>
                         <h3 className="mt-2 text-2xl font-semibold text-white">Drop files for S3 upload</h3>
                         <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-300">
-                          Choose a file, drag it into the upload zone, and send it through the existing backend upload endpoint without changing the server or deployment architecture.
+                          Choose a file, drag it into the upload zone, and send it directly to your AWS S3 bucket using the browser-only upload flow.
                         </p>
                       </div>
                     </div>
@@ -1001,6 +1065,41 @@ function App() {
                       This section keeps the frontend dashboard intact while adding a production-style storage workflow for AWS S3 uploads.
                     </div>
                   </GlassCard>
+
+                  {uploadState.status === 'success' && uploadState.uploadedUrl ? (
+                    <GlassCard className="p-5">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-400/10 text-emerald-200">
+                          <Cloud className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.32em] text-slate-400">Uploaded file card</p>
+                          <h3 className="mt-2 text-lg font-semibold text-white">{uploadState.selectedFile?.name || 'Uploaded file'}</h3>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 grid gap-3 text-sm text-slate-300">
+                        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                          <span>File name</span>
+                          <span className="font-semibold text-white wrap-break-word">{uploadState.selectedFile?.name || '—'}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                          <span>Uploaded URL</span>
+                          <a href={uploadState.uploadedUrl} target="_blank" rel="noreferrer" className="max-w-[55%] truncate font-semibold text-cyan-300 transition hover:text-cyan-200">
+                            Open file
+                          </a>
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                          <span>Object key</span>
+                          <span className="max-w-[55%] truncate font-semibold text-white">{uploadState.objectKey || '—'}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                          <span>Bucket</span>
+                          <span className="font-semibold text-white">{uploadState.bucketName || '—'}</span>
+                        </div>
+                      </div>
+                    </GlassCard>
+                  ) : null}
                 </div>
               </div>
             </GlassCard>
