@@ -4,10 +4,14 @@ import {
   ArrowRight,
   BadgeCheck,
   Bot,
+  CircleCheckBig,
   CheckCircle2,
+  Clock3,
   Cloud,
   Code2,
+  AlertTriangle,
   Container,
+  FileText,
   GitBranch,
   GitCommitVertical,
   Globe,
@@ -19,10 +23,12 @@ import {
   Server,
   ShieldCheck,
   TerminalSquare,
+  UploadCloud,
   X,
   Sparkles,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
 
 const BACKEND_URL = 'http://65.0.86.103:5000'
 
@@ -31,6 +37,7 @@ const navItems = [
   { label: 'Infrastructure', href: '#infrastructure' },
   { label: 'Pipeline', href: '#pipeline' },
   { label: 'Deployment', href: '#deployment' },
+  { label: 'Storage', href: '#s3-upload' },
 ]
 
 const infrastructureCards = [
@@ -88,6 +95,28 @@ const deploymentDefaults = {
   lastDeploymentTime: 'Pending first live check',
 }
 
+const initialUploadState = {
+  selectedFile: null,
+  status: 'idle',
+  progress: 0,
+  message: 'Drag and drop a file here or browse to upload it to the cloud.',
+  error: '',
+  uploadedAt: '',
+  responseText: '',
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) {
+    return '0 B'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const size = bytes / 1024 ** exponent
+
+  return `${size.toFixed(size >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`
+}
+
 function SectionHeader({ eyebrow, title, subtitle }) {
   return (
     <div className="max-w-3xl">
@@ -109,6 +138,8 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [isBooting, setIsBooting] = useState(true)
   const [isChecking, setIsChecking] = useState(false)
+  const [isDragActive, setIsDragActive] = useState(false)
+  const [uploadState, setUploadState] = useState(initialUploadState)
   const [health, setHealth] = useState({
     backendOnline: false,
     apiConnected: false,
@@ -119,6 +150,7 @@ function App() {
     error: '',
   })
   const [deploymentInfo, setDeploymentInfo] = useState(deploymentDefaults)
+  const fileInputRef = useRef(null)
 
   const frontendUrl = useMemo(() => {
     if (typeof window === 'undefined') {
@@ -200,6 +232,153 @@ function App() {
     }
   }, [frontendUrl])
 
+  const setSelectedFile = useCallback((file) => {
+    if (!file) {
+      setUploadState(initialUploadState)
+      return
+    }
+
+    setUploadState((current) => ({
+      ...current,
+      selectedFile: file,
+      status: 'ready',
+      progress: 0,
+      message: `Ready to upload ${file.name} to AWS S3.`,
+      error: '',
+      uploadedAt: '',
+      responseText: '',
+    }))
+  }, [])
+
+  const handleFileSelection = useCallback(
+    (fileList) => {
+      const file = fileList?.[0]
+
+      if (file) {
+        setSelectedFile(file)
+      }
+    },
+    [setSelectedFile],
+  )
+
+  const handleBrowseClick = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
+
+  const handleUpload = useCallback(() => {
+    if (!uploadState.selectedFile || uploadState.status === 'uploading') {
+      return
+    }
+
+    const formData = new FormData()
+    formData.append('file', uploadState.selectedFile)
+
+    setUploadState((current) => ({
+      ...current,
+      status: 'uploading',
+      progress: 0,
+      message: 'Uploading file to AWS S3...',
+      error: '',
+      responseText: '',
+    }))
+
+    const xhr = new XMLHttpRequest()
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return
+      }
+
+      const progress = Math.round((event.loaded / event.total) * 100)
+
+      setUploadState((current) => ({
+        ...current,
+        progress,
+        message: `Uploading... ${progress}%`,
+      }))
+    }
+
+    xhr.onload = () => {
+      const uploadSucceeded = xhr.status >= 200 && xhr.status < 300
+
+      if (uploadSucceeded) {
+        let responseText = xhr.responseText || 'File uploaded successfully.'
+
+        try {
+          const parsedResponse = JSON.parse(xhr.responseText)
+          responseText = parsedResponse.message || responseText
+        } catch {
+          responseText = xhr.responseText || responseText
+        }
+
+        setUploadState((current) => ({
+          ...current,
+          status: 'success',
+          progress: 100,
+          message: 'Upload successful',
+          error: '',
+          uploadedAt: new Date().toLocaleString(),
+          responseText,
+        }))
+        return
+      }
+
+      setUploadState((current) => ({
+        ...current,
+        status: 'error',
+        message: 'Upload failed',
+        error: `Server returned status ${xhr.status}`,
+      }))
+    }
+
+    xhr.onerror = () => {
+      setUploadState((current) => ({
+        ...current,
+        status: 'error',
+        message: 'Upload failed',
+        error: 'Network error while uploading the file.',
+      }))
+    }
+
+    xhr.open('POST', `${BACKEND_URL}/upload`)
+    xhr.send(formData)
+  }, [uploadState.selectedFile, uploadState.status])
+
+  const handleDrop = useCallback(
+    (event) => {
+      event.preventDefault()
+      setIsDragActive(false)
+      handleFileSelection(event.dataTransfer.files)
+    },
+    [handleFileSelection],
+  )
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault()
+    setIsDragActive(true)
+  }, [])
+
+  const handleDragLeave = useCallback((event) => {
+    event.preventDefault()
+    setIsDragActive(false)
+  }, [])
+
+  const uploadStatusTone =
+    uploadState.status === 'success'
+      ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+      : uploadState.status === 'error'
+        ? 'border-rose-400/20 bg-rose-400/10 text-rose-100'
+        : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-100'
+
+  const uploadStatusIcon =
+    uploadState.status === 'success' ? (
+      <CircleCheckBig className="h-4.5 w-4.5 text-emerald-300" />
+    ) : uploadState.status === 'error' ? (
+      <AlertTriangle className="h-4.5 w-4.5 text-rose-300" />
+    ) : (
+      <Cloud className="h-4.5 w-4.5 text-cyan-300" />
+    )
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setIsBooting(false)
@@ -240,7 +419,7 @@ function App() {
           transition={{ duration: 11, repeat: Number.POSITIVE_INFINITY, ease: 'easeInOut' }}
           className="animate-float-slow absolute right-0 top-24 h-80 w-80 rounded-full bg-sky-400/20 blur-3xl"
         />
-        <div className="absolute inset-x-0 top-0 h-[560px] bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),transparent_32%),radial-gradient(circle_at_85%_10%,rgba(14,165,233,0.2),transparent_22%)]" />
+        <div className="absolute inset-x-0 top-0 h-140 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.18),transparent_32%),radial-gradient(circle_at_85%_10%,rgba(14,165,233,0.2),transparent_22%)]" />
         <div className="grid-fade absolute inset-0 opacity-[0.16]" />
       </div>
 
@@ -270,7 +449,7 @@ function App() {
                   <motion.div
                     animate={{ x: ['-40%', '140%'] }}
                     transition={{ duration: 1.6, repeat: Number.POSITIVE_INFINITY, ease: 'easeInOut' }}
-                    className="h-full w-1/3 rounded-full bg-gradient-to-r from-emerald-400 via-cyan-300 to-sky-400"
+                    className="h-full w-1/3 rounded-full bg-linear-to-r from-emerald-400 via-cyan-300 to-sky-400"
                   />
                 </div>
                 <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Connecting AWS EC2, Docker, and GitHub Actions</p>
@@ -366,7 +545,7 @@ function App() {
                   whileTap={{ scale: 0.99 }}
                   type="button"
                   onClick={runBackendCheck}
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-emerald-400 via-cyan-400 to-sky-500 px-5 py-3.5 text-sm font-semibold text-slate-950 shadow-[0_20px_50px_rgba(16,185,129,0.28)] transition"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-linear-to-r from-emerald-400 via-cyan-400 to-sky-500 px-5 py-3.5 text-sm font-semibold text-slate-950 shadow-[0_20px_50px_rgba(16,185,129,0.28)] transition"
                 >
                   {isChecking ? <LoaderCircle className="h-4.5 w-4.5 animate-spin" /> : <Activity className="h-4.5 w-4.5" />}
                   Check Backend Status
@@ -519,7 +698,7 @@ function App() {
 
           <GlassCard className="overflow-hidden p-5 sm:p-6 lg:p-8">
             <div className="relative">
-              <div className="absolute inset-x-8 top-1/2 hidden h-px -translate-y-1/2 bg-gradient-to-r from-emerald-400/0 via-emerald-300/60 to-sky-400/0 lg:block" />
+              <div className="absolute inset-x-8 top-1/2 hidden h-px -translate-y-1/2 bg-linear-to-r from-emerald-400/0 via-emerald-300/60 to-sky-400/0 lg:block" />
               <div className="grid gap-4 lg:grid-cols-9 lg:items-center">
                 {pipelineStages.map((stage, index) => {
                   const Icon = stage.icon
@@ -529,7 +708,7 @@ function App() {
                       <motion.div
                         animate={{ y: [0, -6, 0], boxShadow: ['0 0 0 rgba(0,0,0,0)', '0 0 24px rgba(34,197,94,0.2)', '0 0 0 rgba(0,0,0,0)'] }}
                         transition={{ duration: 3.2 + index * 0.25, repeat: Number.POSITIVE_INFINITY, ease: 'easeInOut' }}
-                        className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/70 text-emerald-300 shadow-[0_0_24px_rgba(34,197,94,0.12)]"
+                        className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/70 text-emerald-300 shadow-[0_0_24px_rgba(34,197,94,0.12)]"
                       >
                         <Icon className="h-6 w-6" />
                       </motion.div>
@@ -572,7 +751,7 @@ function App() {
                     </div>
                     <p className="text-sm font-semibold text-white">{item.label}</p>
                   </div>
-                  <p className="mt-4 break-words text-sm leading-7 text-slate-300">{item.value}</p>
+                  <p className="mt-4 wrap-break-word text-sm leading-7 text-slate-300">{item.value}</p>
                 </motion.div>
               )
             })}
@@ -639,6 +818,193 @@ function App() {
             </AnimatePresence>
           </GlassCard>
         </section>
+
+          <section id="s3-upload" className="scroll-mt-28 space-y-8">
+            <SectionHeader
+              eyebrow="AWS S3 Cloud Storage"
+              title="AWS S3 Cloud Storage Upload"
+              subtitle="Upload files through a modern drag-and-drop interface, with live progress, status feedback, and file metadata shown alongside the existing DevOps dashboard."
+            />
+
+            <GlassCard className="overflow-hidden p-5 sm:p-6 lg:p-8">
+              <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+                <motion.div
+                  whileHover={{ y: -3 }}
+                  onDragEnter={() => setIsDragActive(true)}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`relative flex min-h-90 flex-col justify-between overflow-hidden rounded-[28px] border border-dashed p-6 transition duration-300 sm:p-8 ${isDragActive ? 'border-cyan-300 bg-cyan-400/10 shadow-[0_0_40px_rgba(34,211,238,0.16)]' : 'border-white/10 bg-white/5'}`}
+                >
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.18),transparent_35%),radial-gradient(circle_at_80%_20%,rgba(251,191,36,0.12),transparent_24%)]" />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={(event) => {
+                      handleFileSelection(event.target.files)
+                      event.target.value = ''
+                    }}
+                  />
+
+                  <div className="relative space-y-6">
+                    <div className="flex items-start gap-4">
+                      <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-200 shadow-[0_0_30px_rgba(34,211,238,0.12)]">
+                        <UploadCloud className="h-7 w-7" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.34em] text-cyan-200">Cloud upload workspace</p>
+                        <h3 className="mt-2 text-2xl font-semibold text-white">Drop files for S3 upload</h3>
+                        <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-300">
+                          Choose a file, drag it into the upload zone, and send it through the existing backend upload endpoint without changing the server or deployment architecture.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      {[
+                        { label: 'Selected file', value: uploadState.selectedFile?.name || 'No file chosen' },
+                        { label: 'Upload status', value: uploadState.status === 'uploading' ? 'Uploading...' : uploadState.status === 'success' ? 'Upload successful' : uploadState.status === 'error' ? 'Upload failed' : 'Ready' },
+                        { label: 'Progress', value: `${uploadState.progress}%` },
+                      ].map((item) => (
+                        <div key={item.label} className="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-4 backdrop-blur-sm">
+                          <p className="text-[11px] uppercase tracking-[0.28em] text-slate-400">{item.label}</p>
+                          <p className="mt-3 wrap-break-word text-sm font-semibold text-white">{item.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="relative mt-6 space-y-4">
+                    <div className="overflow-hidden rounded-full bg-slate-900/80">
+                      <motion.div
+                        initial={{ width: 0 }}
+                        animate={{ width: `${uploadState.progress}%` }}
+                        transition={{ duration: 0.3, ease: 'easeOut' }}
+                        className="h-2 rounded-full bg-linear-to-r from-amber-400 via-cyan-300 to-sky-400"
+                      />
+                    </div>
+
+                    <p className="text-sm leading-7 text-slate-300">{uploadState.message}</p>
+
+                    <div className="flex flex-wrap gap-3">
+                      <motion.button
+                        whileHover={{ y: -2, scale: 1.01 }}
+                        whileTap={{ scale: 0.99 }}
+                        type="button"
+                        onClick={handleBrowseClick}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-slate-100 transition hover:bg-white/10"
+                      >
+                        <FileText className="h-4.5 w-4.5 text-cyan-200" />
+                        Browse Files
+                      </motion.button>
+
+                      <motion.button
+                        whileHover={{ y: -2, scale: 1.01 }}
+                        whileTap={{ scale: 0.99 }}
+                        type="button"
+                        onClick={handleUpload}
+                        disabled={!uploadState.selectedFile || uploadState.status === 'uploading'}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl bg-linear-to-r from-amber-400 via-cyan-400 to-sky-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_20px_50px_rgba(251,191,36,0.18)] transition disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {uploadState.status === 'uploading' ? <LoaderCircle className="h-4.5 w-4.5 animate-spin" /> : <UploadCloud className="h-4.5 w-4.5" />}
+                        {uploadState.status === 'uploading' ? 'Uploading...' : 'Upload to S3'}
+                      </motion.button>
+
+                      <motion.button
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.99 }}
+                        type="button"
+                        onClick={() => setSelectedFile(null)}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-5 py-3 text-sm font-semibold text-rose-100 transition hover:bg-rose-400/15"
+                      >
+                        <X className="h-4.5 w-4.5" />
+                        Clear
+                      </motion.button>
+                    </div>
+                  </div>
+                </motion.div>
+
+                <div className="grid gap-4">
+                  <GlassCard className={`p-5 ${uploadStatusTone}`}>
+                    <div className="flex items-start gap-3">
+                      <div className={`flex h-11 w-11 items-center justify-center rounded-2xl border ${uploadState.status === 'success' ? 'border-emerald-400/20 bg-emerald-400/10' : uploadState.status === 'error' ? 'border-rose-400/20 bg-rose-400/10' : 'border-cyan-400/20 bg-cyan-400/10'}`}>
+                        {uploadStatusIcon}
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-slate-400">Upload status</p>
+                        <h3 className="mt-2 text-lg font-semibold text-white">{uploadState.message}</h3>
+                        <p className="mt-3 text-sm leading-7 text-slate-300">
+                          {uploadState.status === 'success'
+                            ? 'The selected file has been uploaded successfully through the browser to the existing backend upload route.'
+                            : uploadState.status === 'error'
+                              ? uploadState.error
+                              : 'The upload panel is ready for a file selection.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 space-y-3">
+                      <div className="flex items-center justify-between text-sm text-slate-300">
+                        <span>Upload progress</span>
+                        <span className="font-semibold text-white">{uploadState.progress}%</span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-slate-900/80">
+                        <motion.div
+                          animate={{ width: `${uploadState.progress}%` }}
+                          transition={{ duration: 0.25, ease: 'easeOut' }}
+                          className="h-full rounded-full bg-linear-to-r from-amber-400 via-cyan-400 to-sky-400"
+                        />
+                      </div>
+                    </div>
+
+                    {uploadState.responseText ? (
+                      <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-4 text-sm text-slate-300">
+                        {uploadState.responseText}
+                      </div>
+                    ) : null}
+                  </GlassCard>
+
+                  <GlassCard className="p-5">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-200">
+                        <Clock3 className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-slate-400">File preview</p>
+                        <h3 className="mt-2 text-lg font-semibold text-white">
+                          {uploadState.selectedFile ? uploadState.selectedFile.name : 'No file selected'}
+                        </h3>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 grid gap-3 text-sm text-slate-300">
+                      <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                        <span>File size</span>
+                        <span className="font-semibold text-white">{uploadState.selectedFile ? formatFileSize(uploadState.selectedFile.size) : '—'}</span>
+                      </div>
+                      <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                        <span>File type</span>
+                        <span className="font-semibold text-white">{uploadState.selectedFile?.type || 'Unknown'}</span>
+                      </div>
+                      <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                        <span>Status</span>
+                        <span className="font-semibold text-white capitalize">{uploadState.status}</span>
+                      </div>
+                      <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                        <span>Upload timestamp</span>
+                        <span className="font-semibold text-white">{uploadState.uploadedAt || 'Pending'}</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 rounded-2xl border border-dashed border-white/10 bg-slate-950/40 px-4 py-4 text-sm leading-7 text-slate-300">
+                      This section keeps the frontend dashboard intact while adding a production-style storage workflow for AWS S3 uploads.
+                    </div>
+                  </GlassCard>
+                </div>
+              </div>
+            </GlassCard>
+          </section>
       </main>
 
       <footer className="relative z-10 border-t border-white/5 bg-slate-950/80">
